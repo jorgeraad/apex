@@ -1,6 +1,10 @@
 # Edge-Case and Hostile Targets — Apex Under Pressure
 
 > Series role: A six-scenario combined spec covering the demos where Apex stops being a happy-path tool and starts being a credible practitioner. Every scenario here exists to defuse one specific objection a viewer or buyer is likely to raise after watching the headline episodes.
+>
+> Read order: top to bottom is fine on first pass; the scenarios are independent and you can jump to whichever objection your conversation actually surfaces. Scenario 5 (the hardened Rust target) is the most-quoted single scenario in sales conversations because it directly answers "does this thing fabricate findings to look useful."
+>
+> Audience: this doc is written for the demo-production team, the technical marketing lead, and security-engineering reviewers vetting the scaffolds. It is not customer-facing.
 
 ## Why this combined doc
 
@@ -24,6 +28,17 @@ The combined release proves four things together that no single headline episode
 3. **Apex does not fabricate.** On a well-built target it returns a near-empty report and says so plainly.
 4. **The judge agent works.** Findings that look real but are not get filtered out before they reach the human reviewer.
 
+Each scenario also functions as a sales-cycle artifact for a different objection persona:
+
+| Scenario | Objection it addresses | Audience persona |
+|---|---|---|
+| 1. WAF | "Our edge will block whatever you throw at it." | Network/infra security |
+| 2. SPA | "Most of our app is in the browser; you can't model it." | Frontend platform leads |
+| 3. SSO/MFA | "We're enterprise; you'll never get past the login wall." | IAM / identity engineers |
+| 4. Rate limits | "We can't have you hammering production." | SRE, platform ops |
+| 5. Hardened | "AI tools fabricate findings to look useful." | Senior AppSec, CISOs |
+| 6. Planted-herring | "Static analysis is a noise machine; you'll be the same." | Security engineers |
+
 Recording cadence, base-scaffold reuse, and shared infra notes are at the bottom of this doc.
 
 ---
@@ -33,6 +48,8 @@ Recording cadence, base-scaffold reuse, and shared infra notes are at the bottom
 ### Premise & Stack
 
 ShopHearth is the Laravel 11 + Livewire e-commerce scaffold from the series' Shopify-shaped episode: storefront, cart, checkout, admin, a coupon engine, a product-search endpoint, and a few REST/JSON endpoints used by the mobile app. For this demo we deploy ShopHearth unchanged behind a real Cloudflare zone with the WAF enabled at "high" sensitivity, plus a self-hosted ModSecurity reverse proxy running OWASP CRS 4.x in front of the origin. Cloudflare rate limiting is set to 100 req/min/IP on `/login`, `/checkout/*`, and `/api/*`. The origin Laravel app still has the same intentional bugs as the original ShopHearth episode (a couple of stored XSS vectors, a SSRF in the import-from-URL tool, an IDOR on order PDFs, a SQLi on a less-trafficked admin search).
+
+Why a layered edge: real e-commerce shops rarely run only one defense. They run a CDN WAF for volumetric and signature-based attacks, then a self-hosted reverse proxy with CRS for finer-grained policy, then app-level mitigations underneath. We mirror that exact structure so the demo is recognizable to anyone who has shipped a production storefront.
 
 | Layer | Choice |
 |---|---|
@@ -46,6 +63,8 @@ ShopHearth is the Laravel 11 + Livewire e-commerce scaffold from the series' Sho
 
 Every classic payload Apex would normally try first — `' OR 1=1 --`, `<script>alert(1)</script>`, `../../etc/passwd`, `{{7*7}}` — gets a 403 from Cloudflare or a 406 from ModSecurity before the origin ever sees it. The demo is not about defeating the WAF. It is about Apex correctly reading the situation: distinguishing "the WAF blocked me" from "the app is not vulnerable," then choosing whether to (a) try a different encoding, (b) move to a less monitored endpoint, or (c) note the WAF as a defense-in-depth control and move on.
 
+A subtle secondary point: a WAF can produce false confidence. The audience should leave understanding that "we have a WAF" is not a substitute for fixing the bugs underneath, and Apex's report makes the underneath/edge distinction explicit by listing each finding's status as `bypassed`, `blocked`, or `partially-bypassed`.
+
 ### Routes or Surfaces of Interest
 
 | Route | Why Apex cares |
@@ -57,6 +76,8 @@ Every classic payload Apex would normally try first — `' OR 1=1 --`, `<script>
 | `GET /api/v1/products?filter=` | JSON API; CRS rule set behaves differently on JSON bodies |
 | `POST /coupons/redeem` | Race-condition candidate; rate limits make naive parallel attacks fail |
 | `GET /sitemap.xml`, `robots.txt`, `/build/manifest.json` | Recon surfaces the WAF doesn't touch |
+| `GET /livewire/livewire.js`, `/livewire/update` | Livewire-specific endpoints; CRS does not have specific rules |
+| `POST /api/v1/customer/profile` | Mass-assignment candidate on a low-traffic JSON endpoint |
 
 ### Intentional Vulnerabilities
 
@@ -67,8 +88,9 @@ Every classic payload Apex would normally try first — `' OR 1=1 --`, `<script>
 | SH-WAF-3 | Stored XSS via product review (admin-rendered) | Reachable with double-URL-encoded `<svg onload>` (CVE class CWE-79) |
 | SH-WAF-4 | Blind SQLi in `admin/search?q=` | Reachable only via time-based payloads with comment obfuscation |
 | SH-WAF-5 | Race condition in coupon redemption | Constrained by rate limits; partial exploit |
+| SH-WAF-6 | Mass assignment on `/api/v1/customer/profile` | Reachable; JSON bodies are less aggressively inspected by CRS at PL2 |
 
-References: behavior models for CRS bypass align with [CVE-2023-38199](https://nvd.nist.gov/vuln/detail/CVE-2023-38199) (CRS body-parser quirks) and the broader CRS evasion research from Coreruleset's own test suite.
+References: behavior models for CRS bypass align with [CVE-2023-38199](https://nvd.nist.gov/vuln/detail/CVE-2023-38199) (CRS body-parser quirks) and the broader CRS evasion research from Coreruleset's own test suite. For Cloudflare-specific bypass research, see the public test corpus at [https://github.com/coreruleset/coreruleset](https://github.com/coreruleset/coreruleset) and Cloudflare's own changelog for Managed Ruleset versioning.
 
 ### Apex Features Showcased
 
@@ -95,6 +117,9 @@ The last beat is the judge agent's pass: it confirms three of the findings, expl
 - Recording: pre-warm Cloudflare cache and CRS rule cache before each take to keep timing consistent.
 - Have a deterministic "WAF-block fixture" suite under `tests/waf/` that asserts each of the five intentional bugs is still reachable and each of the canonical payloads is still blocked, so a CRS rule update doesn't silently change the episode.
 - Document the exact CRS paranoia level and Cloudflare ruleset version used in the README so re-recordings six months later can reproduce the same behavior.
+- Build a `compose.local.yml` that runs ModSecurity locally without Cloudflare for offline development; switch to the Cloudflare-backed compose only for the actual recording.
+- Pre-stage a "no-WAF" run for B-roll so the editor can intercut "with WAF" and "without WAF" report screens for the closing montage.
+- Capture both the Cloudflare ruleset audit log and the ModSecurity `audit.log` for each take and ship them as supporting artifacts alongside the video, for any viewer who wants to verify the blocks were real.
 
 ---
 
@@ -103,6 +128,8 @@ The last beat is the judge agent's pass: it confirms three of the findings, expl
 ### Premise & Stack
 
 "Cartographer" is a freight-routing dashboard for a fictional logistics SaaS. Almost all of the interesting product logic — pricing surcharges, role gating on which screens render, validation of shipment manifests, even some authorization decisions — lives in the Vue 3 SPA bundle. The backend is a deliberately thin Fastify + PostgreSQL REST API that mostly persists what the client tells it to persist, with shallow per-request JWT verification and not much else. The marketing pitch is "instant UI, edge-first." The reality is a fat JS bundle with source maps accidentally shipped to production and a backend that trusts the front end.
+
+This is a deliberately archetypal modern stack. We see it constantly: a small team adopts Vue or React with Pinia/Zustand, scaffolds a thin Express/Fastify/Hono backend, and ships features by writing client logic that "calls the API." The role checks and the validations migrate, one feature at a time, into client stores. The backend never catches up. By Series B, half the authorization model lives in `src/stores/`. This demo is for that team.
 
 | Layer | Choice |
 |---|---|
@@ -117,6 +144,8 @@ The last beat is the judge agent's pass: it confirms three of the findings, expl
 
 There is no server-rendered HTML to crawl. There are no `<a href>` links to most of the API. A naive web spider sees `/`, `/login`, and `/dashboard` and concludes the app has six routes. The real attack surface is in the JS bundle, in the source maps, and in tree-shaken-but-not-removed code paths that compile in but only fire if a Pinia store has a certain shape. The demo proves Apex's `extractJsEndpoints` plus source-map archaeology can recover endpoints that no UI navigation ever reaches.
 
+A second, related twist: the SPA does *correct* client-side validation in many places — formats, ranges, regex checks. A reviewer skimming the bundle could mistake those for security controls. Apex must read them as UX hints, not enforcement, and probe the backend for whether the same constraints exist there.
+
 ### Routes or Surfaces of Interest
 
 | Surface | Visible from UI? | How Apex finds it |
@@ -128,6 +157,8 @@ There is no server-rendered HTML to crawl. There are no `<a href>` links to most
 | `GET /api/internal/_debug/whoami` | No | String literal in bundle, never called |
 | `POST /api/fleet/:id/decommission` | No | Behind a `v-if="user.role === 'super'"` guard, but the endpoint exists |
 | `GET /api/exports/csv?token=` | No | Referenced in a worker chunk lazy-loaded for admins |
+| `PATCH /api/shipments/:id` | Partially | Visible action, but accepts more fields than the form sends |
+| `GET /api/_health/deep` | No | String in service-worker chunk only |
 
 ### Intentional Vulnerabilities
 
@@ -138,8 +169,9 @@ There is no server-rendered HTML to crawl. There are no `<a href>` links to most
 | CG-SPA-3 | Source maps shipped to prod | Reveals internal module structure, comments, dev TODOs |
 | CG-SPA-4 | Hardcoded internal API token | In `apiClient.ts` for the `/api/exports/csv` worker, scoped too broadly |
 | CG-SPA-5 | JWT `aud` not validated | A token issued for the marketing site verifies on the API |
+| CG-SPA-6 | Mass assignment via `PATCH /api/shipments/:id` | Backend spreads request body into Prisma `update.data` |
 
-CWE references: CWE-602 (Client-Side Enforcement of Server-Side Security), CWE-540 (Inclusion of Sensitive Information in Source Code), CWE-798 (Use of Hard-coded Credentials).
+CWE references: CWE-602 (Client-Side Enforcement of Server-Side Security), CWE-540 (Inclusion of Sensitive Information in Source Code), CWE-798 (Use of Hard-coded Credentials), CWE-915 (Improperly Controlled Modification of Dynamically-Determined Object Attributes).
 
 ### Apex Features Showcased
 
@@ -166,6 +198,8 @@ The closing beat reframes the whole demo: this is not an exotic class of bug, it
 - Ship a `prod-broken` Docker profile with `build.sourcemap = true` so the source-map beat is reproducible.
 - Include a second Vite config (`vite.config.locked.ts`) with source maps off and the role-check moved server-side, so the README can show the same target in "fixed" form for educational purposes.
 - Seed at least two tenants and three roles (`viewer`, `dispatcher`, `super_admin`) so the cross-tenant CSV export finding has a concrete blast radius the report can quote.
+- Add a unit test under `tests/bundle/` that asserts the bundle contains references to all six intentional endpoints; if a future code change tree-shakes one out, CI fails and the recording isn't accidentally invalidated.
+- Optional follow-up: a "before and after" recap video that re-runs Apex on the *fixed* version (server-side role checks, no source maps, scoped JWT) and shows the report dropping to zero findings.
 
 ---
 
@@ -174,6 +208,8 @@ The closing beat reframes the whole demo: this is not an exotic class of bug, it
 ### Premise & Stack
 
 "Northwind Procurement" is a fictional enterprise SaaS for B2B procurement workflows: vendor onboarding, RFP management, contract approvals. Every customer enforces SSO via Okta SAML, and end-user step-up auth uses WebAuthn (FIDO2) passkeys for any action that touches a contract. There is no password login at all once SSO is provisioned; service accounts use mTLS-bound API keys. This is the most enterprise-y target in the series: a Fortune-500-shaped login flow with branding, just-in-time provisioning, group-claim-based authorization, and a passkey requirement on sensitive actions.
+
+We chose Spring Boot 3 deliberately because Spring Security's SAML 2 service-provider support is one of the most widely deployed enterprise SAML implementations in the world, and its quirks are economically real. WebAuthn4J was chosen because it is the actively maintained Java FIDO2 library with the cleanest test surface for virtual authenticators. Okta was chosen as the IdP because it is the most common enterprise IdP in mid-market SaaS and its dev tier is free.
 
 | Layer | Choice |
 |---|---|
@@ -188,6 +224,8 @@ The closing beat reframes the whole demo: this is not an exotic class of bug, it
 ### Adversarial Twist
 
 The login wall is real and unforgiving. Apex cannot brute-force its way past Okta — and shouldn't try, because Okta is out of scope and a serious customer-trust violation if it did. The demo is about Apex's `authenticationAgent` walking a *legitimate* auth flow with a test account: completing the SAML AuthnRequest/Response handshake, registering a passkey via the WebAuthn ceremony, persisting the resulting session/cookie state, and only *then* starting authenticated testing. We also need to be honest about what Apex cannot do — phishing the user, bypassing the IdP, or testing Okta itself.
+
+A particularly thorny demo design challenge: WebAuthn assertions are bound to the relying-party origin and cannot be replayed across origins. Apex's virtual authenticator must register against the actual demo origin, not a proxy. We document this constraint explicitly because it is the single most common reason WebAuthn pentests "don't work" — and it is a feature of the spec, not a bug in the tool.
 
 ### Routes or Surfaces of Interest
 
@@ -212,6 +250,7 @@ The login wall is real and unforgiving. Apex cannot brute-force its way past Okt
 | NW-SSO-3 | WebAuthn challenge reuse window too long (5 min, no single-use) | Allows replay within window |
 | NW-SSO-4 | Session not rebound on step-up | Step-up assertion accepted, but session-id rotation skipped, enabling fixation chain |
 | NW-SSO-5 | `/actuator/info` exposed with build metadata | Low-severity info-disclosure |
+| NW-SSO-6 | RelayState parameter unsigned and reflected on `/sso/acs` | Open-redirect after auth; CWE-601 |
 
 References: [CVE-2017-11427](https://nvd.nist.gov/vuln/detail/CVE-2017-11427) (Shibboleth/OneLogin SAML XSW), [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) is unrelated but commonly confused — do not cite. WebAuthn challenge handling: see W3C WebAuthn Level 3 §5.1.3.
 
@@ -250,6 +289,8 @@ The closing two minutes are deliberately uncomfortable: we show Apex's "Caveats 
 
 This demo reuses the entire VaultLine fintech scaffold from Episode 1, with two additions: hCaptcha (enterprise tier, with the "passive" mode for clean traffic) gating `/login`, `/register`, and `/transfers/initiate`; and Bucket4j-backed token-bucket rate limits on every authenticated endpoint, keyed by user ID with per-tenant quotas. The intentional bugs from Episode 1 are still there — JWT alg confusion, the Actuator heap-dump issue, the cross-tenant filter — but the path to them is now gated.
 
+This is the most "boring" of the six episodes by design. The bugs are not new. The stack is not new. The audience has already met VaultLine. The whole point is to show that when a real fintech turns on the boring defenses everyone in the industry has agreed are table stakes — CAPTCHAs on auth surfaces, token-bucket rate limits on the API — Apex behaves like a polite citizen of that environment rather than a runaway scanner.
+
 | Layer | Choice |
 |---|---|
 | Base | VaultLine scaffold from Episode 1 |
@@ -261,6 +302,8 @@ This demo reuses the entire VaultLine fintech scaffold from Episode 1, with two 
 
 This is not "can Apex defeat hCaptcha." Apex must not defeat hCaptcha — bypassing CAPTCHAs unsolicited would be a serious series-credibility hit. The demo is about restraint: Apex detects the CAPTCHA, recognizes 429 patterns from Bucket4j, paces itself, asks the operator for a session token if it needs authenticated probing past the wall, and explicitly refuses to brute force or solve CAPTCHAs without human authorization. The buyer fear we are addressing is "this thing will hammer my prod target into the ground."
 
+The deeper adversarial twist is that Bucket4j here is mis-keyed in places (per Episode 1's original bugs), so naive request-rate observation produces inconsistent signals: some endpoints rate-limit per IP, others per user, others per tenant. A well-paced agent has to infer the keying scheme rather than assume one global limit, and the demo shows Apex doing that inference on camera.
+
 ### Routes or Surfaces of Interest
 
 | Route | Gate | Apex behavior |
@@ -271,10 +314,16 @@ This is not "can Apex defeat hCaptcha." Apex must not defeat hCaptcha — bypass
 | `GET /api/v1/accounts` | Rate limit only | Stay below 50 rpm conservatively |
 | `GET /actuator/heapdump` | Rate limit + auth | Single request; back off if 429 |
 | `POST /api/v1/merchant/data` | Per-tenant bucket | Detect tenant-scoped throttling; pace per-tenant |
+| `POST /password/reset` | hCaptcha + rate limit | Skip; only operator-opt-in testing |
+| `GET /api/v1/transactions` | Per-user bucket | Sample first; infer bucket from `X-Rate-Limit-*` |
 
-### Scenario Variant (instead of new vulnerabilities)
+### Intentional Vulnerabilities
 
-The vulnerabilities are unchanged from Episode 1. The variant is the *interaction model*:
+The vulnerabilities themselves are unchanged from Episode 1 — JWT alg confusion, Actuator heapdump exposure, cross-tenant filter bypass, the merchant rate-limiter mis-keying, and the IDOR on transaction history. The full list and their CVE-class references can be read in `01-vaultline-fintech.md`. The point of *this* episode is not "what is wrong with VaultLine"; it is "how does Apex behave when reaching VaultLine's known bugs is gated by hCaptcha and Bucket4j."
+
+### Scenario Variant
+
+The variant is the *interaction model*:
 
 - **CAPTCHA detection.** Apex parses hCaptcha widget markup and `siteverify` redirects, identifies the presence of a CAPTCHA without solving it, and flags the protected endpoint accordingly.
 - **Rate-limit detection.** Apex distinguishes 429s from Bucket4j (`X-Rate-Limit-Remaining`, `Retry-After`), 403s from WAF, and origin 503s. It uses exponential backoff keyed on `Retry-After`.
@@ -289,6 +338,8 @@ The vulnerabilities are unchanged from Episode 1. The variant is the *interactio
 - CAPTCHA fingerprinting (hCaptcha, reCAPTCHA v2/v3, Turnstile, FunCaptcha — even though only hCaptcha is in use here).
 - Operator prompts for human authorization on CAPTCHA-gated surfaces.
 - Final report's "Defenses Observed" and "Test Pacing" sections, with concrete metrics (avg requests/min, max sustained, total requests).
+- Configurable "production-safe mode" that hard-caps sustained request rate at 10 rpm, disables any probe class flagged as `disruptive`, and refuses CAPTCHA-gated surfaces without explicit per-engagement opt-in.
+- A pre-engagement "test plan" output that the operator can review before the run begins, listing every endpoint Apex intends to probe and the maximum request count budgeted for each. The operator can edit the plan and re-confirm.
 
 ### Demo Storyline
 
@@ -306,6 +357,9 @@ The closing minute is a side-by-side of two reports: the original VaultLine repo
 - Recording: capture the same target twice — once without limits, once with — and intercut the request-rate graphs.
 - Include a `bucket4j-config-tour.md` that walks through the per-IP, per-user, and per-tenant bucket definitions, so viewers who pause the video can read the actual configuration.
 - Add a regression test under `tests/pacing/` that asserts Apex's observed-from-outside request rate stays under a configured ceiling for the full recording window.
+- Wire request-rate metrics into Prometheus and dashboard them in Grafana for the recording. The on-screen request-rate chart needs to be live and accurate, not a static screenshot.
+- Stage two pre-authenticated session JWTs (one regular user, one merchant tenant admin) so the operator can paste the right one in without fumbling on camera.
+- Optional bonus: a third take in which the operator deliberately raises the rate ceiling to "test what happens when production-safe mode is off" — a teaching moment for buyers who want to understand the difference between production-safe and full-throttle modes.
 
 ---
 
@@ -370,6 +424,8 @@ That is the entire findings table. Everything else Apex investigates must be mar
 - **Whitebox source reading.** Apex reads Cargo.toml, dependency versions, Axum middleware stack, sqlx queries, and the `AuthContext` type to *prove* security properties rather than just probe them.
 - **Honesty in the executive summary.** The summary literally says "this target is well built; the only finding is informational and at the operator's discretion."
 - **Confidence calibration.** No "high" or "critical" rows. No "suspected" rows that the judge let through to pad the report.
+- **Threat-model reasoning.** Apex's threat-model agent produces a clean diagram of trust boundaries (browser, edge, app, DB) and observes that the typed `AuthContext<Role>` makes one whole class of bug structurally impossible. That observation is in the report as a positive finding — not a vulnerability, but a defense worth crediting.
+- **Dependency-aware audit.** Apex runs through the dependency graph and confirms there are no unpatched advisories at the time of the run; this section of the report can be regenerated on a schedule even if the app code does not change.
 
 ### Demo Storyline
 
@@ -450,6 +506,7 @@ CWE / CVE references for the *shapes* the decoys imitate: CWE-95 (eval), CWE-79 
 - **Runtime config tracing.** Apex follows `Application.compile_env`/`Application.get_env` through to runtime overlays and avoids reporting the placeholder literal as a hardcoded secret.
 - **Network-control awareness.** Apex sees the `:ip_allowlist` plug and tries `/admin` from the configured "external" IP it has been told to test from, gets denied, and dismisses the "exposed admin" finding.
 - **Confirmed real bugs preserved.** The two genuine bugs (RC-REAL-1 and RC-REAL-2) survive the judge and appear in the final report at correct severities.
+- **Per-finding evidence packs.** Each dismissed finding gets a self-contained evidence pack (file path, line range, the exact request that was attempted, the response, the safety mechanism's rejection log line). This makes a human reviewer's spot-check fast — they can re-run any of the six dismissals and reproduce the result.
 
 ### Demo Storyline
 
@@ -496,6 +553,23 @@ Total new build: ~22 engineer-days, plus ~5 days infra/overlay work, plus ~4 day
 - Single `demos-edge/` directory under the repo root, with one subdirectory per scenario, each containing a `README.md`, a `docker-compose.yml`, and (where applicable) the overlay file that switches it into edge mode.
 - A shared `tools/record/` directory with the recording-script generator, the request-rate graph renderer (used heavily in Scenario 4), and the report-diff tool (used in Scenario 5 to show the empty-vs-full report contrast).
 - A shared `tools/verify/` directory with per-scenario "verify the bugs are still live" scripts; CI runs these on every PR so a refactor doesn't accidentally fix or break the demo bugs.
+- A shared `tools/anonymize/` directory for stripping PII from any artifacts captured during recording (SAML responses, JWTs, log lines containing test-account emails) before publication.
+- A shared editorial guide at `docs/editorial.md` covering tone, terminology consistency ("vulnerability" vs "finding" vs "issue"), severity rubric, and screen-recording cadence so the six episodes feel like a single series.
+
+### Reporting consistency
+
+All six episodes share a single report template so viewers can pattern-match across them. The template has the following sections, in this order:
+
+1. Executive summary (3-5 sentences, written by Apex, reviewed by operator).
+2. Findings table (severity, title, status, confirmed/suspected/dismissed).
+3. Per-finding detail (description, evidence, reproduction, impact, remediation).
+4. Investigated and dismissed (the judge agent's reasoning per non-finding).
+5. Defenses observed (WAF, rate limits, CSP, typed auth, IP allowlists, etc.).
+6. Caveats and limits (what was not tested and why).
+7. Test pacing (request rates, total requests, operator interventions).
+8. Out of scope (hosts, tenants, IdPs, third-party services).
+
+Episodes 4 (rate limits) and 5 (hardened) lean heavily on sections 5 and 7. Episode 6 (planted-herring) leans heavily on section 4. Episode 3 (SSO/MFA) leans heavily on section 6. The template is intentionally over-specified for any single episode; the joint visual language across the series is the point.
 
 ### Series-level claims these episodes underwrite
 
@@ -509,3 +583,20 @@ By the end of these six episodes, the series can credibly claim — and demonstr
 6. Filters look-alike vulnerabilities through a judge agent before reporting (Scenario 6).
 
 Those six claims, each with a recorded episode behind it, are the basis on which a senior security buyer can recommend Apex internally without staking their own reputation on hand-wave marketing.
+
+### Risks to manage during recording
+
+- **CRS rule drift.** OWASP CRS publishes minor updates frequently; a paranoia level 2 ruleset today may behave differently in six months. Pin the version and document it in `compose.waf.yml`.
+- **Okta dev-tenant policy changes.** Okta occasionally updates default password policies and MFA requirements on dev tenants. Re-verify the SAML test flow before each recording.
+- **Cargo dependency CVEs.** A new CVE in a transitive dep on the Lighthouse target could turn the "clean target" episode into a "moderate finding" episode overnight. Run `cargo audit` immediately before each recording and snapshot the lockfile.
+- **hCaptcha sandbox changes.** The sandbox sitekey occasionally changes its widget markup; re-verify CAPTCHA fingerprinting before each Scenario 4 take.
+- **Phoenix or Ecto API changes.** A breaking change to `Code.string_to_quoted` or `fragment/1` semantics would invalidate the planted-herring decoys. Pin Elixir and Phoenix versions in the RelayChat repo and have CI fail on minor bumps.
+- **Vite or Vue major-version changes.** A bundle-format change in Vite could break the chunk-graph parsing in Scenario 2. Pin Vite to a specific minor and document the bundle layout the demo depends on.
+- **Apex agent behavior drift.** Across releases, the swarm's exact ordering of probes can change. The episodes should not depend on any specific *order* of finding discovery; storyline beats need to be robust to reordering.
+
+### What this combined doc deliberately does not cover
+
+- **Mobile app pentesting.** The series will get there, but it is its own thing — separate scaffolds, separate tooling, separate scope. Out of scope here.
+- **Cloud-native infrastructure pentesting.** Kubernetes RBAC, cloud IAM, IMDS exploitation. Also a future series; out of scope here.
+- **Internal-network pivots.** Apex is not, in any of these episodes, walking through internal networks. Every scenario assumes the operator runs Apex against an exposed-by-design target, with explicit scope.
+- **Source-code-only static analysis as the primary mode.** Apex is a dynamic-first agent; whitebox is an enrichment, not a replacement. None of the six episodes lead with SAST behavior.
