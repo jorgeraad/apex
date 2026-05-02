@@ -10,9 +10,11 @@ A demo target for **Pensar Apex**: a real-time matching app with photo uploads, 
 
 Plantr is the dating app your fiddle-leaf fig has been quietly hoping for. Owners post profiles for each plant in their collection — species, light preferences, leaf count, last repot date, a flirty bio, and three glamour shots. The recommendation engine surfaces botanically compatible matches (same genus, opposite chromosome count, complementary bloom seasons). Owners swipe right; on a mutual match a real-time chat opens so the humans can coordinate a pollen handoff. There is also an `Import from URL` feature that scrapes a plant's profile from a competitor "leaf book," because the founder believes data portability is a human right.
 
-The vibe is consumer mobile: pastel gradients, haptic-feeling animations on the web build, push notifications on the native build. Engineering velocity has prioritized cute over correct. The Mongoose schemas are loose, the Socket.IO handlers were copy-pasted from a tutorial in 2021, and the multipart upload handler was hand-rolled because "multer felt like overkill for one screen." Every one of those decisions has consequences.
+The vibe is consumer mobile: pastel gradients, haptic-feeling animations on the web build, push notifications on the native build. Engineering velocity has prioritized cute over correct. The Mongoose schemas are loose, the Socket.IO handlers were copy-pasted from a tutorial in 2021, and the multipart upload handler was hand-rolled because "multer felt like overkill for one screen." The founder's Notion doc literally says "we'll harden later, growth first." Every one of those decisions has consequences.
 
-The recording angle: Apex walks in, sees the swipe API, and within ten minutes is reading `/etc/passwd` from a Kali shell because someone named a plant photo `../../../etc/cron.d/pwn`.
+The recording angle: Apex walks in, sees the swipe API, and within ten minutes is reading `/etc/passwd` from a Kali shell because someone named a plant photo `../../../etc/cron.d/pwn`. Then it patches it. Then it moves on to the next bug. The whole time, the swipe deck on the right of the screen is still showing fiddle-leaf figs flirting with each other, completely unbothered.
+
+The serious read: Plantr is what most consumer-mobile B2C apps look like when they're 18 months old, pre-Series-A, and one security hire away from a bug-bounty program. The bug shapes here are the bug shapes those programs actually pay out on.
 
 ---
 
@@ -329,12 +331,25 @@ A 12-minute screen recording, split across three acts.
 - Don't use `multer`. The hand-rolled parser is the point.
 - Don't pin `jsonwebtoken` to a fixed-version. Use 8.5.1 and the missing `algorithms` option.
 - Don't put a real allowlist on `fetch`. Comment `// TODO: SSRF guard` next to the call. The TODO is canon.
+- Don't add a CSP header. The XSS demo on the web build needs to actually fire.
+- Don't sanitize the `bio` field on write. The XSS lives in render-time, but if you also strip on write the demo won't reproduce after the patch lands and a tester replays the seed data.
+- Don't use `helmet()`. Helmet would mask several of these too eagerly.
+
+**Test harness expectations.**
+- A `tools/seed.js` that creates 50 users (one with email `attacker@plantr.test`, one with `victim@plantr.test`), 200 plants, and a handful of pre-existing matches and chat threads. Apex's swarm uses these as low-priv credentials.
+- A `tools/imds-mock.js` that binds a fake IMDS responder on the api container at `http://169.254.169.254/latest/meta-data/iam/security-credentials/PlantrEC2Role` returning a believable but synthetic credential blob. The SSRF demo needs a juicy target without leaving the lab.
+- A `tools/reset.sh` that drops `uploads/` and re-seeds Mongo. Run between recording takes.
+
+**Things to leave intentionally hard.**
+- The IDOR (V7) requires noticing that `/api/users/:id/likes` exists at all. The Expo app never calls it; it's a leftover from the previous swipe UI. Apex's JS endpoint extraction is what surfaces it. Keep it referenced in `routes/users.js` but unused by the client. That asymmetry is the showcase.
+- The CORS misconfig (V8) is only practical to demonstrate against the web build, where browser CORS rules apply. Keep a small `attacker.html` static file in the demo repo that fetches `/api/me` with `credentials: 'include'` and posts the response to a webhook. Apex generates the same file at exploit time.
 
 ---
 
 ## Recording Notes
 
 - Resolution 1920x1200, 60fps, two-pane: Apex TUI on left, target browser/terminal on right.
+- Pre-flight checklist before each take: `tools/reset.sh`, restart `docker-compose`, clear browser storage, confirm IMDS mock is bound, confirm `attacker@plantr.test` and `victim@plantr.test` log in cleanly. The single most-common reshoot cause is stale uploads from a previous traversal making the `/uploads` directory listing look weird.
 - Use a real Tinder-ish color palette in the Expo web build (peach to mint gradient). The aesthetic delta between cute UI and Kali shell is the joke.
 - Pre-stage three plant accounts with photos: a monstera named "Steve," a pothos named "Greg," and a snake plant named "Linda, esq."
 - For Act II step 4, split the screen three ways briefly: Apex finding card, the multipart request body with the `..` filename highlighted, and the Kali shell catching the connect-back. Pause for 3 seconds on the prompt.
